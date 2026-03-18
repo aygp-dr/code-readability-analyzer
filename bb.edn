@@ -1,8 +1,13 @@
-{:paths ["src"]
+{:paths ["src" "test"]
  :deps {org.babashka/cli {:mvn/version "0.8.61"}}
  :tasks
  {:override-builtin true
   run {:doc "Score code readability and suggest improvements"
        :task (apply (requiring-resolve 'code_readability_analyzer.core/-main) *command-line-args*)}
   scan {:doc "Scan current directory"
-        :task (apply (requiring-resolve 'code_readability_analyzer.core/-main) ["--dir" "."])}}}
+        :task (apply (requiring-resolve 'code_readability_analyzer.core/-main) ["--dir" "."])}
+  test {:doc "Run tests"
+        :requires ([clojure.test])
+        :task (do (require 'code_readability_analyzer.core-test)
+                  (let [{:keys [fail error]} (clojure.test/run-tests 'code_readability_analyzer.core-test)]
+                    (System/exit (if (zero? (+ fail error)) 0 1))))}}}
