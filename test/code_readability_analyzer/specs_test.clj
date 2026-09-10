@@ -13,15 +13,8 @@
 (def ^:private side-effecting
   #{`sut/analyze-file `sut/find-source-files `sut/-main})
 
-;; TODO(spec): (score-comment-ratio 0.049) => 14.7 but
-;; (score-comment-ratio 0.05) => 7.5. Below 5% the score ramps 0 -> 15 and
-;; then drops back to 7.5 at 5%, so more comments score less.
-(def ^:private known-failing
-  #{`sut/score-comment-ratio})
-
 (defn- checkable []
-  (remove (into side-effecting known-failing)
-          (stest/enumerate-namespace 'code_readability_analyzer.core)))
+  (remove side-effecting (stest/enumerate-namespace 'code_readability_analyzer.core)))
 
 (deftest fdefs-hold-under-generative-testing
   (let [results (stest/check (checkable) check-opts)]

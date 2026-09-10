@@ -110,7 +110,11 @@
   (testing "No comments"
     (is (= 0.0 (core/score-comment-ratio 0.0))))
   (testing "Too many comments"
-    (is (= 0.0 (core/score-comment-ratio 0.50)))))
+    (is (= 0.0 (core/score-comment-ratio 0.50))))
+  (testing "Continuous at 5%: more comments below the band never score less"
+    (is (== 7.5 (core/score-comment-ratio 0.05)))
+    (is (< (core/score-comment-ratio 0.049) (core/score-comment-ratio 0.05)))
+    (is (apply <= (map core/score-comment-ratio (range 0.0 0.10 0.005))))))
 
 (deftest score-complexity-test
   (testing "Low complexity"
