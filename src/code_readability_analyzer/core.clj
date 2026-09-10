@@ -1,8 +1,10 @@
 (ns code_readability_analyzer.core
   (:require [babashka.cli :as cli]
             [babashka.fs :as fs]
+            [clojure.spec.alpha :as s]
             [clojure.string :as str]
-            [cheshire.core :as json]))
+            [cheshire.core :as json]
+            [code-readability-analyzer.specs :as specs]))
 
 ;; --- Language detection ---
 
@@ -21,6 +23,10 @@
   (let [ext (some-> (fs/extension filepath) str/lower-case)]
     (get lang-extensions ext :unknown)))
 
+(s/fdef detect-language
+  :args (s/cat :filepath ::specs/path-like)
+  :ret ::specs/lang)
+
 ;; --- Metric: line lengths ---
 
 (defn line-length-metrics [lines]
@@ -29,6 +35,12 @@
     (let [lengths (mapv count lines)]
       {:avg-line-length (double (/ (reduce + lengths) (count lengths)))
        :max-line-length (apply max lengths)})))
+
+(s/fdef line-length-metrics
+  :args (s/cat :lines ::specs/source-lines)
+  :ret ::specs/line-lengths
+  :fn (fn [{{:keys [avg-line-length max-line-length]} :ret}]
+        (<= avg-line-length max-line-length)))
 
 ;; --- Metric: function length ---
 
@@ -50,6 +62,13 @@
       (keep-indexed (fn [i line] (when (re-find pat line) i)) lines)
       [])))
 
+(s/fdef find-function-starts
+  :args (s/cat :lines ::specs/source-lines :lang ::specs/lang)
+  :ret (s/coll-of nat-int? :kind sequential?)
+  :fn (fn [{{:keys [lines]} :args ret :ret}]
+        (and (every? #(< % (count lines)) ret)
+             (or (empty? ret) (apply < ret)))))
+
 (defn avg-function-length [lines lang]
   (let [starts (vec (find-function-starts lines lang))]
     (if (< (count starts) 2)
@@ -62,6 +81,12 @@
             last-gap (- (count lines) (last starts))]
         (double (/ (reduce + (conj (vec gaps) last-gap))
                    (count starts)))))))
+
+(s/fdef avg-function-length
+  :args (s/cat :lines ::specs/source-lines :lang ::specs/lang)
+  :ret ::specs/length
+  :fn (fn [{{:keys [lines]} :args ret :ret}]
+        (<= ret (count lines))))
 
 ;; --- Metric: nesting depth ---
 
@@ -85,6 +110,13 @@
           :else
           (recur depth max-depth (rest remaining)))))))
 
+(s/fdef max-nesting-depth
+  :args (s/cat :lines ::specs/source-lines)
+  :ret ::specs/depth
+  :fn (fn [{{:keys [lines]} :args ret :ret}]
+        ;; can't nest deeper than the number of openers
+        (<= ret (count (filter nesting-openers (apply str lines))))))
+
 ;; --- Metric: naming consistency ---
 
 (def identifier-pattern #"\b([a-z][a-zA-Z0-9_]*)\b")
@@ -94,6 +126,10 @@
     (re-find #"_" name-str) (if (re-find #"[A-Z]" name-str) :mixed :snake_case)
     (re-find #"[A-Z]" name-str) :camelCase
     :else :neutral))
+
+(s/fdef classify-name
+  :args (s/cat :name-str ::specs/identifier)
+  :ret ::specs/name-class)
 
 (defn naming-consistency [lines]
   (let [all-text (str/join "\n" lines)
@@ -108,6 +144,13 @@
       1.0
       (let [dominant (apply max (vals freqs))]
         (double (/ dominant total))))))
+
+(s/fdef naming-consistency
+  :args (s/cat :lines ::specs/source-lines)
+  :ret ::specs/ratio
+  :fn (fn [{ret :ret}]
+        ;; the dominant of three naming styles covers at least a third
+        (<= (/ 1.0 3) ret)))
 
 ;; --- Metric: comment ratio ---
 
@@ -133,6 +176,10 @@
       (let [comment-count (count (filter #(re-find pat %) non-blank))]
         (double (/ comment-count total))))))
 
+(s/fdef comment-ratio
+  :args (s/cat :lines ::specs/source-lines :lang ::specs/lang)
+  :ret ::specs/ratio)
+
 ;; --- Metric: cyclomatic complexity proxy ---
 
 (def branch-keywords
@@ -156,6 +203,10 @@
       (let [branch-count (reduce + 0 (map #(count (re-seq pat %)) lines))]
         (double (/ branch-count total-lines))))))
 
+(s/fdef cyclomatic-complexity-proxy
+  :args (s/cat :lines ::specs/source-lines :lang ::specs/lang)
+  :ret ::specs/density)
+
 ;; --- Scoring ---
 
 (defn score-avg-line-length
@@ -166,6 +217,13 @@
     (>= avg 120) 0.0
     :else (* 15.0 (/ (- 120 avg) 40.0))))
 
+(s/fdef score-avg-line-length
+  :args (s/cat :avg ::specs/length)
+  :ret ::specs/points-15
+  :fn (fn [{{:keys [avg]} :args ret :ret}]
+        ;; longer lines never score more
+        (<= ret (score-avg-line-length (max 0 (- avg 1))))))
+
 (defn score-max-line-length
   "Ideal: <= 120. Penalty ramps from 120 to 200."
   [mx]
@@ -173,6 +231,12 @@
     (<= mx 120) 10.0
     (>= mx 200) 0.0
     :else (* 10.0 (/ (- 200 mx) 80.0))))
+
+(s/fdef score-max-line-length
+  :args (s/cat :mx ::specs/depth)
+  :ret ::specs/points-10
+  :fn (fn [{{:keys [mx]} :args ret :ret}]
+        (<= ret (score-max-line-length (max 0 (dec mx))))))
 
 (defn score-avg-function-length
   "Ideal: <= 20 lines. Penalty ramps from 20 to 60."
@@ -182,6 +246,12 @@
     (>= avg 60) 0.0
     :else (* 15.0 (/ (- 60 avg) 40.0))))
 
+(s/fdef score-avg-function-length
+  :args (s/cat :avg ::specs/length)
+  :ret ::specs/points-15
+  :fn (fn [{{:keys [avg]} :args ret :ret}]
+        (<= ret (score-avg-function-length (max 0 (- avg 1))))))
+
 (defn score-nesting-depth
   "Ideal: <= 4. Penalty ramps from 4 to 10."
   [depth]
@@ -190,20 +260,43 @@
     (>= depth 10) 0.0
     :else (* 15.0 (/ (- 10 depth) 6.0))))
 
+(s/fdef score-nesting-depth
+  :args (s/cat :depth ::specs/depth)
+  :ret ::specs/points-15
+  :fn (fn [{{:keys [depth]} :args ret :ret}]
+        (<= ret (score-nesting-depth (max 0 (dec depth))))))
+
 (defn score-naming-consistency
   "Consistency ratio 0-1, scaled to 15 points."
   [ratio]
   (* 15.0 ratio))
+
+(s/fdef score-naming-consistency
+  :args (s/cat :ratio ::specs/ratio)
+  :ret ::specs/points-15
+  :fn (fn [{{:keys [ratio]} :args ret :ret}]
+        (<= (score-naming-consistency (max 0.0 (- ratio 0.01))) ret)))
 
 (defn score-comment-ratio
   "Ideal: 10-30%. Penalty outside that range."
   [ratio]
   (cond
     (and (>= ratio 0.10) (<= ratio 0.30)) 15.0
-    (< ratio 0.05) (* 15.0 (/ ratio 0.05))
+    (< ratio 0.05) (* 15.0 0.5 (/ ratio 0.05))
     (< ratio 0.10) (+ (* 15.0 0.5) (* 15.0 0.5 (/ (- ratio 0.05) 0.05)))
     (> ratio 0.50) 0.0
     :else (* 15.0 (/ (- 0.50 ratio) 0.20))))
+
+(s/fdef score-comment-ratio
+  :args (s/cat :ratio ::specs/ratio)
+  :ret ::specs/points-15
+  :fn (fn [{{:keys [ratio]} :args ret :ret}]
+        ;; full marks in the 10-30% band, and never fewer points than a
+        ;; ratio 0.01 further from the band
+        (cond
+          (< ratio 0.10) (<= (score-comment-ratio (max 0.0 (- ratio 0.01))) ret)
+          (> ratio 0.30) (<= (score-comment-ratio (min 1.0 (+ ratio 0.01))) ret)
+          :else (== 15.0 ret))))
 
 (defn score-complexity
   "Ideal: <= 0.1 branches per line. Penalty ramps from 0.1 to 0.4."
@@ -212,6 +305,12 @@
     (<= complexity 0.1) 15.0
     (>= complexity 0.4) 0.0
     :else (* 15.0 (/ (- 0.4 complexity) 0.3))))
+
+(s/fdef score-complexity
+  :args (s/cat :complexity ::specs/density)
+  :ret ::specs/points-15
+  :fn (fn [{{:keys [complexity]} :args ret :ret}]
+        (<= ret (score-complexity (max 0.0 (- complexity 0.01))))))
 
 (defn analyze-file [filepath]
   (let [content (slurp (str filepath))
@@ -245,6 +344,10 @@
      :metrics metrics
      :scores scores}))
 
+(s/fdef analyze-file
+  :args (s/cat :filepath ::specs/path-like)
+  :ret ::specs/result)
+
 ;; --- File discovery ---
 
 (def scannable-extensions
@@ -261,6 +364,10 @@
        (remove #(str/includes? (str %) "target/"))
        (remove #(str/includes? (str %) "vendor/"))
        (sort-by str)))
+
+(s/fdef find-source-files
+  :args (s/cat :dir ::specs/path-like)
+  :ret (s/coll-of #(instance? java.nio.file.Path %) :kind sequential?))
 
 ;; --- Output formatting ---
 
@@ -279,6 +386,12 @@
                (format "    Complexity proxy:      %d%%" (:cyclomatic-complexity-proxy metrics))
                ""])))
 
+(s/fdef format-text-result
+  :args (s/cat :result ::specs/result)
+  :ret string?
+  :fn (fn [{{:keys [result]} :args ret :ret}]
+        (str/includes? ret (str "Score: " (:score result) "/100"))))
+
 (defn format-text [results]
   (let [avg-score (if (empty? results) 0
                       (Math/round (double (/ (reduce + (map :score results))
@@ -291,6 +404,12 @@
                [(str (apply str (repeat 60 "=")))
                 (format "Overall average score: %d/100" avg-score)]))))
 
+(s/fdef format-text
+  :args (s/cat :results ::specs/results)
+  :ret string?
+  :fn (fn [{{:keys [results]} :args ret :ret}]
+        (str/includes? ret (str "(" (count results) " files)"))))
+
 (defn format-json [results]
   (let [avg-score (if (empty? results) 0
                       (Math/round (double (/ (reduce + (map :score results))
@@ -301,6 +420,12 @@
                 :average-score avg-score}}
      {:pretty true})))
 
+(s/fdef format-json
+  :args (s/cat :results ::specs/results)
+  :ret string?
+  :fn (fn [{{:keys [results]} :args ret :ret}]
+        (= (count results) (get-in (json/parse-string ret true) [:summary :file-count]))))
+
 (defn format-edn [results]
   (let [avg-score (if (empty? results) 0
                       (Math/round (double (/ (reduce + (map :score results))
@@ -308,6 +433,12 @@
     (pr-str {:files results
              :summary {:file-count (count results)
                        :average-score avg-score}})))
+
+(s/fdef format-edn
+  :args (s/cat :results ::specs/results)
+  :ret string?
+  :fn (fn [{{:keys [results]} :args ret :ret}]
+        (= (count results) (get-in (read-string ret) [:summary :file-count]))))
 
 ;; --- CLI ---
 
@@ -345,6 +476,9 @@
                 (doseq [f failing]
                   (println (format "  %s: %d/100" (:file f) (:score f))))
                 (System/exit 1)))))))))
+
+(s/fdef -main
+  :args (s/* string?))
 
 (when (= *file* (System/getProperty "babashka.file"))
   (apply -main *command-line-args*))
