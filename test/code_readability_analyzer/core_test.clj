@@ -1,7 +1,12 @@
 (ns code_readability_analyzer.core-test
-  (:require [clojure.test :refer [deftest is testing run-tests]]
+  (:require [clojure.spec.test.alpha :as stest]
+            [clojure.test :refer [deftest is testing run-tests use-fixtures]]
             [clojure.string :as str]
             [code_readability_analyzer.core :as core]))
+
+;; Exercise every s/fdef :args spec while the unit tests run.
+(use-fixtures :once
+  (fn [f] (stest/instrument) (try (f) (finally (stest/unstrument)))))
 
 ;; --- Language detection ---
 
